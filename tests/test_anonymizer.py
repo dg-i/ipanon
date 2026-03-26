@@ -780,3 +780,16 @@ class TestHostBitLocking:
         int_val = int(ipaddress.IPv4Address(result))
         host_bits = int_val & 0x07  # last 3 bits for /29
         assert host_bits == 5
+
+    def test_mixed_v4_v6_registry(self) -> None:
+        """Registry with both IPv4 and IPv6 entries locks host bits for both."""
+        registry = self._make_registry("10.0.0.0/8-24", "2001:db8::/32-64")
+        a = Anonymizer("salt", network_registry=registry, ignore_reserved=True)
+        # IPv4: last octet preserved
+        v4_result = a.anonymize("10.1.2.42")
+        assert int(v4_result.split(".")[-1]) == 42
+        # IPv6: last 64 bits (interface ID) preserved
+        v6_result = a.anonymize("2001:db8:1::abcd")
+        orig_iid = int(ipaddress.IPv6Address("2001:db8:1::abcd")) & ((1 << 64) - 1)
+        result_iid = int(ipaddress.IPv6Address(v6_result)) & ((1 << 64) - 1)
+        assert orig_iid == result_iid

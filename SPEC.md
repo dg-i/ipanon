@@ -1033,7 +1033,7 @@ For example, for bit position 3 with prefix bits `101`:
 - 1 bit → returns 0 or 1
 - 1000 random 16-bit values all produce distinct outputs
 
-### 12.3 test_anonymizer.py (100 tests)
+### 12.3 test_anonymizer.py (101 tests)
 
 **TestAnonymizerBasic (3 tests):**
 - Deterministic with same salt
@@ -1137,7 +1137,7 @@ For example, for bit position 3 with prefix bits `101`:
 - Both flags same as --ignore-reserved alone
 - --pass-through still works with --ignore-reserved
 
-**TestHostBitLocking (11 tests):**
+**TestHostBitLocking (12 tests):**
 - CIDR input matching registry preserves host bits (last octet = 65 for `10.1.2.65/29`)
 - Bare IP matching registry preserves host bits
 - Without registry, all bits permuted (backwards compat)
@@ -1149,6 +1149,7 @@ For example, for bit position 3 with prefix bits `101`:
 - Cat A with registry: stays in range AND host bits preserved
 - IPv6 with registry: last 64 bits (interface ID) preserved
 - Plain CIDR in registry locks at its own prefix length
+- Mixed v4/v6 registry: IPv4 host bits and IPv6 interface ID both preserved
 
 ### 12.4 test_scanner.py (36 tests)
 
@@ -1260,7 +1261,7 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 - Mapping file is flat dict when `--networks` not used
 - Invalid network spec (`/24-16`) produces error
 
-### 12.6 test_networks.py (26 tests)
+### 12.6 test_networks.py (27 tests)
 
 **TestNetworkEntry (4 tests):**
 - Plain CIDR creates entry where network prefix == host_boundary
@@ -1277,7 +1278,7 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 - IPv4 boundary exceeding 32 raises ValueError
 - IPv6 boundary exceeding 128 raises ValueError
 
-**TestNetworkRegistryLookup (8 tests):**
+**TestNetworkRegistryLookup (9 tests):**
 - Basic match returns host_boundary
 - No match returns None
 - Empty registry returns None
@@ -1286,6 +1287,7 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 - Non-overlapping networks match independently
 - IPv6 address lookup
 - Range CIDR returns host_boundary, not match prefix
+- Mixed v4 and v6 entries: each protocol looks up independently
 
 **TestNetworkRegistryLoadFile (2 tests):**
 - Load networks from file (comments and blank lines ignored)

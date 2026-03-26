@@ -154,6 +154,19 @@ class TestNetworkRegistryLookup:
         registry.add("172.16.0.0/12-24")
         assert registry.lookup("172.20.1.5") == 24
 
+    def test_mixed_v4_and_v6(self) -> None:
+        """Registry with both IPv4 and IPv6 entries lookups independently."""
+        registry = NetworkRegistry()
+        registry.add("10.0.0.0/8-24")
+        registry.add("2001:db8::/32-64")
+        # IPv4 matches IPv4 entry
+        assert registry.lookup("10.1.2.5") == 24
+        # IPv6 matches IPv6 entry
+        assert registry.lookup("2001:db8:1::1") == 64
+        # IPv4 doesn't match IPv6 and vice versa
+        assert registry.lookup("192.168.1.1") is None
+        assert registry.lookup("2001:db9::1") is None
+
 
 class TestNetworkRegistryLoadFile:
     """Test loading from file."""
