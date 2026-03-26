@@ -28,7 +28,7 @@ pre-commit run --all-files    # run all pre-commit hooks
 2. **Linting** — `ruff check src/ tests/`
 3. **Type checking** — `mypy src/` (configured in pyproject.toml, strict mode)
 4. **Tests** — `pytest tests/` (270 tests across 6 test files)
-5. **Test coverage verification** — Confirm all 6 test files are running (test_ranges, test_permutation, test_anonymizer, test_scanner, test_cli, test_networks)
+5. **Test coverage verification** — Confirm all 6 test files are running: test_ranges (51), test_permutation (16), test_anonymizer (100), test_scanner (36), test_cli (41), test_networks (26)
 6. **All tests must pass** — **CRITICAL**: Fix any failing tests immediately, do not commit/push with failing tests
 7. **Final review** — Check `git diff --staged` to review what will be committed
 8. **Security check** — Verify no sensitive information (keys, tokens, passwords) is included

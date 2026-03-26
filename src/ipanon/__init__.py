@@ -1,6 +1,6 @@
 """CIDR-aware IP anonymizer with prefix-preserving permutation."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from ipanon.anonymizer import Anonymizer, PassThroughCollisionError
 from ipanon.networks import NetworkEntry, NetworkRegistry

@@ -26,6 +26,7 @@ src/
     ranges.py
     permutation.py
     anonymizer.py
+    networks.py
     scanner.py
     cli.py
 tests/
@@ -33,6 +34,7 @@ tests/
   test_ranges.py
   test_permutation.py
   test_anonymizer.py
+  test_networks.py
   test_scanner.py
   test_cli.py
 ```
@@ -46,7 +48,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ipanon"
-version = "0.2.1"
+version = "0.3.0"
 description = "CIDR-aware IP anonymizer with prefix-preserving permutation"
 requires-python = ">=3.9"
 license = "MIT"
@@ -111,7 +113,7 @@ plan.txt
 ### 1.4 Dependencies
 
 - Python >= 3.9
-- No third-party runtime dependencies (uses only stdlib: `ipaddress`, `hmac`, `hashlib`, `argparse`, `json`, `os`, `sys`, `re`, `enum`)
+- No third-party runtime dependencies (uses only stdlib: `ipaddress`, `hmac`, `hashlib`, `argparse`, `json`, `os`, `sys`, `re`, `enum`, `dataclasses`)
 - Dev: `pytest`, `ruff`
 
 ### 1.5 Commands
@@ -129,15 +131,18 @@ ruff format src/ tests/            # format
 ```python
 """CIDR-aware IP anonymizer with prefix-preserving permutation."""
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from ipanon.anonymizer import Anonymizer, PassThroughCollisionError
+from ipanon.networks import NetworkEntry, NetworkRegistry
 from ipanon.ranges import Category, classify_ip
 from ipanon.scanner import find_ips, scan_and_replace
 
 __all__ = [
     "Anonymizer",
     "Category",
+    "NetworkEntry",
+    "NetworkRegistry",
     "PassThroughCollisionError",
     "classify_ip",
     "find_ips",
@@ -387,6 +392,7 @@ class Anonymizer:
         verbose: bool = False,
         ignore_subnets: bool = False,
         ignore_reserved: bool = False,
+        network_registry: NetworkRegistry | None = None,
     )
 ```
 
@@ -424,6 +430,12 @@ Parse addr_str → (ip_part, prefix_len or None)
 Parse ip_part with ipaddress.ip_address()
   → If invalid: return addr_str unchanged
 
+Resolve host_boundary from network_registry:
+  If network_registry is not None:
+    host_boundary = network_registry.lookup(ip_part)
+  Else:
+    host_boundary = None
+
 Short prefix check (BEFORE classification):
   IPv4: /0 or /1 → return unchanged (no warning)
   IPv4: /2 to /7 → return unchanged + WARNING (verbose only)
@@ -435,8 +447,8 @@ User pass-through check:
 
 Category classification via classify_ip():
   Cat B → return unchanged
-  Cat A → _anonymize_cat_a()
-  Cat C → _anonymize_cat_c()
+  Cat A → _anonymize_cat_a(host_boundary)
+  Cat C → _anonymize_cat_c(host_boundary)
 ```
 
 ### 5.4 Category A Algorithm (_anonymize_cat_a)
@@ -452,7 +464,17 @@ host_val = int_val & ((1 << remaining_bits) - 1)
 range_name = str(matching_range.network)
 context = f"v4:catA:{range_name}" or f"v6:catA:{range_name}"
 
-anon_host = prefix_preserving_permute(host_val, remaining_bits, salt, context)
+# Host-bit locking: only permute network portion, preserve host portion
+if host_boundary is not None and locked_bits < host_boundary < total_bits:
+    net_bits = host_boundary - locked_bits
+    host_bits = total_bits - host_boundary
+    net_part = host_val >> host_bits
+    host_part = host_val & ((1 << host_bits) - 1)
+    anon_net_part = prefix_preserving_permute(net_part, net_bits, salt, context)
+    anon_host = (anon_net_part << host_bits) | host_part
+else:
+    anon_host = prefix_preserving_permute(host_val, remaining_bits, salt, context)
+
 anon_int = locked_part | anon_host
 
 # CIDR masking: only when input is a network address (host bits all zero)
@@ -500,7 +522,17 @@ else:
 **Step 2: Permute bits 8-31**
 ```python
 lower_24 = int_val & 0xFFFFFF
-anon_lower = prefix_preserving_permute(lower_24, 24, salt, f"v4:{first_octet}")
+
+# Host-bit locking: only permute network portion, preserve host portion
+if host_boundary is not None and 8 < host_boundary < 32:
+    net_bits = host_boundary - 8
+    host_bits_count = 32 - host_boundary
+    net_part = lower_24 >> host_bits_count
+    host_part = lower_24 & ((1 << host_bits_count) - 1)
+    anon_net = prefix_preserving_permute(net_part, net_bits, salt, f"v4:{first_octet}")
+    anon_lower = (anon_net << host_bits_count) | host_part
+else:
+    anon_lower = prefix_preserving_permute(lower_24, 24, salt, f"v4:{first_octet}")
 ```
 
 Note: context uses `original_first_octet` (not anonymized), so each source /8
@@ -528,7 +560,17 @@ first_byte = (int_val >> 120) & 0xFF
 anon_first_byte = v6_first_byte_perm.get(first_byte, first_byte)
 
 lower_120 = int_val & ((1 << 120) - 1)
-anon_lower = prefix_preserving_permute(lower_120, 120, salt, f"v6:{first_byte}")
+
+# Host-bit locking: only permute network portion, preserve host portion
+if host_boundary is not None and 8 < host_boundary < 128:
+    net_bits = host_boundary - 8
+    host_bits_count = 128 - host_boundary
+    net_part = lower_120 >> host_bits_count
+    host_part = lower_120 & ((1 << host_bits_count) - 1)
+    anon_net = prefix_preserving_permute(net_part, net_bits, salt, f"v6:{first_byte}")
+    anon_lower = (anon_net << host_bits_count) | host_part
+else:
+    anon_lower = prefix_preserving_permute(lower_120, 120, salt, f"v6:{first_byte}")
 
 anon_int = (anon_first_byte << 120) | anon_lower
 # Host-bit-aware CIDR mask and collision check same as IPv4
@@ -640,13 +682,23 @@ _COMBINED_PATTERN = re.compile(
 
 IPv6 is tried first (to prevent IPv4 from matching IPv4-mapped addresses).
 
-### 6.4 find_ips(text) -> List[Match]
+### 6.4 extract_cidrs(text) -> List[str]
+
+Extract all CIDR strings (addr/prefix) from text. Used by
+`NetworkRegistry.load_from_text()` for `--networks auto`.
+
+```python
+def extract_cidrs(text: str) -> List[str]:
+    return [m.group(0) for m in find_ips(text) if "/" in m.group(0)]
+```
+
+### 6.5 find_ips(text) -> List[Match]
 
 1. Run `_COMBINED_PATTERN.finditer(text)`
 2. For each match, validate with `ipaddress.ip_address(ip_part)` — reject any regex match that doesn't parse as a valid IP
 3. Return list of valid Match objects
 
-### 6.5 scan_and_replace(text, anonymizer) -> str
+### 6.6 scan_and_replace(text, anonymizer) -> str
 
 1. Call `find_ips(text)` to get all matches
 2. Process matches **right to left** (reversed) to preserve string offsets
@@ -675,7 +727,15 @@ Options:
                                Cat B and IPv6 are unaffected.
   --ignore-reserved            Remove ALL Cat A and Cat B handling. Every IP
                                gets fully anonymized as public. Both IPv4/IPv6.
-  -m, --mapping FILE           Write IP mapping to FILE (JSON)
+  --networks CIDRS_OR_AUTO     Comma-separated CIDRs for subnet-aware host-bit
+                               locking, or 'auto' to collect from input.
+                               Supports range notation (A/X-Y) and interface
+                               notation. Can combine with --network-file.
+  --network-file FILE          File with one CIDR per line for subnet-aware
+                               host-bit locking. # comments and blank lines
+                               ignored. Can combine with --networks.
+  -m, --mapping FILE           Write IP mapping to FILE (JSON). Includes
+                               network list when --networks/--network-file used.
   -v, --verbose                Print stats to stderr. Can repeat:
                                -v   print count of unique IPs processed
                                -vv  print all mappings (original -> anonymized) + count
@@ -706,6 +766,24 @@ def main(argv=None):
 
     remaps = parse_remap_flags(args.remap)
 
+    # Read input FIRST (needed before --networks auto can collect CIDRs)
+    text = read_input(args.input_file)  # file or stdin
+
+    # Build network registry from --networks and/or --network-file
+    registry = None
+    if args.networks or args.network_file:
+        registry = NetworkRegistry()
+        if args.network_file:
+            registry.load_file(args.network_file)
+        if args.networks:
+            if args.networks == "auto":
+                registry.load_from_text(text)
+            else:
+                for cidr in args.networks.split(","):
+                    registry.add(cidr.strip())
+        if args.verbose >= 1 and not args.quiet:
+            registry.warn_overlaps()
+
     try:
         anonymizer = Anonymizer(
             salt=salt,
@@ -715,12 +793,11 @@ def main(argv=None):
             quiet=args.quiet,
             ignore_subnets=args.ignore_subnets,
             ignore_reserved=args.ignore_reserved,
+            network_registry=registry,
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
-
-    text = read_input(args.input_file)  # file or stdin
 
     try:
         output = scan_and_replace(text, anonymizer)
@@ -730,9 +807,14 @@ def main(argv=None):
 
     write_output(output, args.output_file)  # file or stdout
 
+    # Write mapping — includes network list when registry is active
     if args.mapping:
-        json.dump(anonymizer.get_mapping(), open(args.mapping, "w"),
-                  indent=2, sort_keys=True)
+        mapping = anonymizer.get_mapping()
+        if registry is not None:
+            mapping_data = {"networks": registry.to_spec_list(), "mapping": mapping}
+        else:
+            mapping_data = mapping
+        json.dump(mapping_data, open(args.mapping, "w"), indent=2, sort_keys=True)
 
     # Verbose output (suppressed by --quiet)
     if not args.quiet:
@@ -854,6 +936,13 @@ WARNING: Cannot anonymize short prefix {addr_str} (prefix length < /32). Passing
 | `--ignore-reserved` + `--pass-through` | Pass-through still works; other IPs fully anonymized |
 | Both `--ignore-subnets` + `--ignore-reserved` | Same as `--ignore-reserved` alone |
 | Invalid IP string passed to anonymize() | Return unchanged |
+| `--networks` with IP not in any entry | Full permutation (no host-bit locking), same as without `--networks` |
+| `--networks` with IP matching entry | Host bits below boundary preserved; network bits above boundary permuted normally |
+| `--networks` stability: same salt, with vs without | Network portion of output identical; only host bits differ (preserved vs permuted) |
+| `--networks` + CIDR network address (e.g., `10.1.2.0/24`) | Host bits still zeroed by CIDR masking (locking preserves zero bits as zero) |
+| `--networks auto` | Collects only CIDR patterns (addr/prefix) from input text |
+| `host_boundary == locked_bits` (e.g., Cat A /8 with registry /8-8) | No host-bit locking effect (all bits already locked or permuted normally) |
+| `host_boundary == total_bits` (e.g., /24-32) | No host-bit locking effect (zero host bits to preserve) |
 
 ---
 
@@ -880,7 +969,7 @@ For example, for bit position 3 with prefix bits `101`:
 
 ## 12. Testing Specification
 
-### 12.1 test_ranges.py (44 tests)
+### 12.1 test_ranges.py (51 tests)
 
 **TestFirstOctetSets (7 tests):**
 - Three IPv4 sets are pairwise disjoint
@@ -891,7 +980,7 @@ For example, for bit position 3 with prefix bits `101`:
 - MIXED values = `{100, 169, 172, 192, 198, 203}`
 - RESERVED includes 0, 10, 127, 224-255
 
-**TestClassifyIPv4 (20 tests):**
+**TestClassifyIPv4 (21 tests):**
 - Cat B: 127.0.0.1 (loopback), 0.0.0.0 (this-network), 224.0.0.1 (multicast), 255.255.255.255 (broadcast), 192.0.2.1 (TEST-NET-1), 198.51.100.1 (TEST-NET-2), 203.0.113.1 (TEST-NET-3), 198.18.0.1 (benchmarking)
 - Cat A: 10.1.2.3 (locked=8), 172.16.0.1 (locked=12), 192.168.1.1 (locked=16), 100.64.0.1 (locked=10), 169.254.1.1 (locked=16)
 - Cat C: 8.8.8.8 (locked=0), 1.1.1.1
@@ -910,6 +999,17 @@ For example, for bit position 3 with prefix bits `101`:
 - Cat B bytes include 0xFF
 - Pure public = 250 values, includes 0x20
 - All four sets cover {0..255}
+
+**TestComputeIPv4OctetSets (4 tests):**
+- Default lists produce same sets as static constants
+- Only-/8 Cat A → 172, 100, 169 become pure-public; 192, 198, 203 stay mixed (Cat B sub-ranges)
+- Empty lists → all 256 pure-public
+- Any combination produces a valid partition of {0..255}
+
+**TestComputeIPv6FirstByteSets (3 tests):**
+- Default lists match static constants (250 pure-public)
+- Empty lists → all 256 pure-public
+- Any combination produces a valid partition of {0..255}
 
 ### 12.2 test_permutation.py (16 tests)
 
@@ -933,7 +1033,7 @@ For example, for bit position 3 with prefix bits `101`:
 - 1 bit → returns 0 or 1
 - 1000 random 16-bit values all produce distinct outputs
 
-### 12.3 test_anonymizer.py (63 tests)
+### 12.3 test_anonymizer.py (100 tests)
 
 **TestAnonymizerBasic (3 tests):**
 - Deterministic with same salt
@@ -943,7 +1043,7 @@ For example, for bit position 3 with prefix bits `101`:
 **TestCategoryB (10 tests):**
 - Each Cat B address unchanged: 127.0.0.1, 255.255.255.255, 224.0.0.1, 0.0.0.0, 192.0.2.1, 198.51.100.1, 203.0.113.1, 198.18.0.1, ::1, ff02::1
 
-**TestCategoryA (11 tests):**
+**TestCategoryA (10 tests):**
 - Each range stays within its network: 10.x, 172.16.x, 192.168.x, 100.64.x, 169.254.x
 - Cat A IPs actually change (not pass-through)
 - Deterministic
@@ -1013,9 +1113,47 @@ For example, for bit position 3 with prefix bits `101`:
 - Quiet suppresses mixed-octet warning
 - Quiet does not suppress errors (ValueError still raised)
 
+**TestIgnoreSubnets (9 tests):**
+- 172.16.0.1 fully anonymized (no longer range-preserved)
+- 192.168.1.1 fully anonymized
+- 100.64.0.1 fully anonymized
+- 169.254.1.1 fully anonymized
+- 10.1.2.3 still stays in 10.0.0.0/8 (Cat A /8 unaffected)
+- 127.0.0.1 still pass-through (Cat B unaffected)
+- fe80::1 still range-preserved (IPv6 Cat A unaffected)
+- Pool size increases from 215 to 218 (172, 100, 169 move to pure-public)
+- `--remap 172=42` raises ValueError (172 no longer mixed)
+
+**TestIgnoreReserved (11 tests):**
+- 127.0.0.1 anonymized (no longer Cat B)
+- 10.1.2.3 fully anonymized (no longer Cat A)
+- 224.0.0.1 anonymized (no longer Cat B)
+- Pool size = 256 (all first octets pure-public)
+- No mixed octets exist
+- fd00::1 anonymized (IPv6 ULA no longer Cat A)
+- ::1 anonymized (IPv6 loopback no longer Cat B)
+- ff02::1 anonymized (IPv6 multicast no longer Cat B)
+- Any remap fails (no mixed octets)
+- Both flags same as --ignore-reserved alone
+- --pass-through still works with --ignore-reserved
+
+**TestHostBitLocking (11 tests):**
+- CIDR input matching registry preserves host bits (last octet = 65 for `10.1.2.65/29`)
+- Bare IP matching registry preserves host bits
+- Without registry, all bits permuted (backwards compat)
+- Network portion identical with and without registry (stability property)
+- Host address never becomes broadcast with registry
+- Network address stays network address (last octet = 0)
+- CIDR suffix preserved in output
+- IP not in registry gets full permutation (matches no-registry output)
+- Cat A with registry: stays in range AND host bits preserved
+- IPv6 with registry: last 64 bits (interface ID) preserved
+- Plain CIDR in registry locks at its own prefix length
+
 ### 12.4 test_scanner.py (36 tests)
 
 **TestFindIPv4 (16 tests):**
+
 - Simple IP found
 - IP with CIDR found (e.g., `10.0.0.0/8`)
 - Multiple IPs found
@@ -1045,7 +1183,7 @@ For example, for bit position 3 with prefix bits `101`:
 - Compressed with trailing groups (`2001:db8::f:0/112` matched fully)
 - Three groups after `::` (`2001:db8::1:2:3` matched fully)
 
-**TestScanAndReplace (9 tests):**
+**TestScanAndReplace (10 tests):**
 - Replaces IPv4 (preserves surrounding text)
 - Replaces CIDR (preserves prefix length)
 - Preserves non-IP text
@@ -1057,7 +1195,7 @@ For example, for bit position 3 with prefix bits `101`:
 - Version string preserved while IP replaced
 - Compressed IPv6 with CIDR produces no extra groups (no 9-group corruption)
 
-### 12.5 test_cli.py (24 tests)
+### 12.5 test_cli.py (41 tests)
 
 Uses subprocess to invoke `python -m ipanon.cli`.
 
@@ -1099,6 +1237,71 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 - Empty env var → non-zero exit, var name in stderr
 - `--salt` and `--salt-env` mutually exclusive (argparse error)
 
+**TestCLIIgnoreSubnets (4 tests):**
+- Flag accepted (exit code 0)
+- 172.16.0.1 anonymized as public
+- 10.x still range-preserved
+- `--remap 172=42` fails with "mixed" error
+
+**TestCLIIgnoreReserved (4 tests):**
+- Flag accepted (exit code 0)
+- 127.0.0.1 anonymized
+- 10.1.2.3 anonymized
+- Combined with `--pass-through` still works
+
+**TestNetworksFlag (9 tests):**
+- `--networks` with inline CIDRs preserves host bits (last octet = 65)
+- `--networks auto` collects CIDRs from input
+- `--network-file` loads from file
+- `--networks` and `--network-file` can be combined
+- Verbose mode warns about overlapping networks
+- Without `--networks`, output unchanged (backwards compat)
+- Mapping file includes `networks` list when `--networks` used
+- Mapping file is flat dict when `--networks` not used
+- Invalid network spec (`/24-16`) produces error
+
+### 12.6 test_networks.py (26 tests)
+
+**TestNetworkEntry (4 tests):**
+- Plain CIDR creates entry where network prefix == host_boundary
+- Range CIDR creates entry with different match scope and host boundary
+- Interface notation extracts correct network (e.g., `11.2.3.65/29` → `11.2.3.64/29`)
+- Range notation with host bits in address
+
+**TestNetworkRegistryAdd (7 tests):**
+- Host boundary < match prefix raises ValueError
+- Range with boundary == prefix is same as plain CIDR
+- Deduplication: same network from different host addresses counted once
+- IPv6 plain CIDR
+- IPv6 range notation
+- IPv4 boundary exceeding 32 raises ValueError
+- IPv6 boundary exceeding 128 raises ValueError
+
+**TestNetworkRegistryLookup (8 tests):**
+- Basic match returns host_boundary
+- No match returns None
+- Empty registry returns None
+- Least specific (shortest prefix) match wins
+- Least specific wins regardless of add order
+- Non-overlapping networks match independently
+- IPv6 address lookup
+- Range CIDR returns host_boundary, not match prefix
+
+**TestNetworkRegistryLoadFile (2 tests):**
+- Load networks from file (comments and blank lines ignored)
+- Comments and blank lines are ignored
+
+**TestNetworkRegistryLoadFromText (1 test):**
+- Auto-collect CIDRs from config text
+
+**TestNetworkRegistryWarnOverlaps (2 tests):**
+- Overlapping networks produce a warning
+- Non-overlapping networks produce no warning
+
+**TestNetworkRegistryEntries (2 tests):**
+- Export entries as spec strings (range notation preserved)
+- Plain CIDR exported without range notation
+
 ---
 
 ## 13. Subnet-Aware Host-Bit Locking (networks.py)
@@ -1113,8 +1316,9 @@ Routers reject these addresses for interface assignment.
 
 A `NetworkRegistry` collects known subnets and provides least-specific-match
 lookup. During anonymization, the registry determines a `host_boundary` —
-the prefix length where host bits start. Bits above the boundary are permuted;
-bits at and below are preserved unchanged.
+the bit position where host bits start. Bits above the boundary are anonymized
+(shuffle + HMAC permutation); bits at and below the boundary are preserved
+unchanged.
 
 ### 13.3 Network Specification Format
 
@@ -1125,6 +1329,65 @@ Two forms are supported:
   Bits 8–23 are HMAC-permuted, bits 24–31 are preserved.
 
 Interface notation is accepted: `11.2.3.65/29` → network `11.2.3.64/29`.
+
+### 13.3.1 Bit-Level Walkthrough
+
+**Example: `--networks 8.1.0.0/16-24` with input `8.1.2.3`**
+
+The `/16` means only IPs in `8.1.0.0/16` are affected (e.g., `9.1.2.3` is
+untouched). The `-24` sets the host boundary at bit 24.
+
+```
+8.1.2.3 = 00001000 . 00000001 . 00000010 . 00000011
+          |--------- anonymize first 24 bits ---------|-- keep last 8 --|
+          |shuffle 8|---HMAC permute 16 bits----------|-- preserve ----|
+          (octet 1)   (bits 8-23)                       (bits 24-31)
+```
+
+- **Bits 0–7** (first octet `8`): shuffled via the first-octet permutation table
+- **Bits 8–23** (16 bits): HMAC prefix-preserving permuted with context `v4:8`
+- **Bits 24–31** (last octet `.3`): preserved unchanged
+
+Output: `{shuffled}.{permuted}.{permuted}.3` — the `.3` survives anonymization.
+
+**Example: `--networks 10.0.0.0/8-24` with Cat A input `10.50.100.42`**
+
+Cat A already locks the first 8 bits (`10.`). The host boundary at 24 further
+restricts the permutable window:
+
+```
+10.50.100.42 = 00001010 . 00110010 . 01100100 . 00101010
+               |Cat A lock|---HMAC permute 16 bits------|-- preserve --|
+               (bits 0-7)  (bits 8-23)                    (bits 24-31)
+```
+
+- **Bits 0–7**: locked by Cat A (stays `10.`)
+- **Bits 8–23**: HMAC permuted with context `v4:catA:10.0.0.0/8`
+- **Bits 24–31** (`.42`): preserved by host-bit locking
+
+**Example: IPv6 `--networks 2001:db8::/32-64` with input `2001:db8:1:2:a:b:c:d`**
+
+```
+2001:db8:1:2:a:b:c:d
+|shuffle 8|---HMAC permute 56 bits---|--- preserve 64 bits (IID) ---|
+(byte 0)   (bits 8-63)                (bits 64-127)
+```
+
+- **Bits 0–7** (first byte `0x20`): shuffled via IPv6 first-byte permutation
+- **Bits 8–63** (56 bits): HMAC prefix-preserving permuted
+- **Bits 64–127** (interface identifier `a:b:c:d`): preserved unchanged
+
+**Example: IPv6 Cat A `--networks fe80::/10-64` with link-local `fe80::1`**
+
+```
+fe80::1
+|Cat A lock 10|---HMAC permute 54 bits---|--- preserve 64 bits (IID) ---|
+(bits 0-9)     (bits 10-63)               (bits 64-127)
+```
+
+- **Bits 0–9**: locked by Cat A (stays in `fe80::/10`)
+- **Bits 10–63** (54 bits): HMAC permuted
+- **Bits 64–127** (EUI-64 interface identifier): preserved
 
 ### 13.4 Lookup Rule
 
@@ -1181,5 +1444,8 @@ All warnings and errors go to stderr. All warnings are suppressed by `-q`/`--qui
 | Pass-through collision (allowed) | `WARNING: {same message}` | Warning |
 | Bad --remap format | `ERROR: Invalid --remap format '{val}'...` | Error (exit 1) |
 | --salt-env var not set or empty | `ERROR: Environment variable {name} is not set or empty.` | Error (exit 1) |
+| Network overlap (verbose) | `WARNING: Network {inner} is contained in {outer} (redundant — {outer} already covers it)` | Verbose warning (-v only, suppressed by -q) |
+| Invalid network spec | `ERROR: host boundary {n} must be >= match prefix {m} in '{spec}'` | Error (exit 1) |
+| Invalid --network-file | `ERROR: {OSError or ValueError message}` | Error (exit 1) |
 | -v (verbose) | `Processed {N} unique IPs.` | Info (stderr, suppressed by -q) |
 | -vv (very verbose) | `{original} -> {anonymized}` for each mapping, then stats | Info (stderr, suppressed by -q) |

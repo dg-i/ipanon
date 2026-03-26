@@ -6,6 +6,7 @@ A deterministic, CIDR-aware IP anonymizer for log sanitization. Replaces IPv4 an
 
 - **Prefix-preserving permutation** — IPs sharing a /8 or larger subnet stay grouped after anonymization; subnet relationships are preserved at every prefix length
 - **Three-tier classification** — private ranges stay private, loopback/multicast pass through unchanged, public IPs get fully anonymized
+- **Subnet-aware host-bit locking** — preserves host bits within known subnets, preventing broadcast/network address collisions in router configs
 - **Deterministic** — same salt always produces the same output, enabling cross-log correlation
 - **IPv4 + IPv6** — full support for both protocols including CIDR notation
 - **Streaming** — reads stdin, writes stdout; works in pipelines
