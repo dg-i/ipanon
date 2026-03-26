@@ -5,9 +5,12 @@ from __future__ import annotations
 import ipaddress
 import os
 import sys
-from typing import Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 
 from ipanon.permutation import make_permutation, prefix_preserving_permute
+
+if TYPE_CHECKING:
+    from ipanon.networks import NetworkRegistry
 from ipanon.ranges import (
     CATEGORY_A_V4,
     CATEGORY_A_V6,
@@ -42,6 +45,9 @@ class Anonymizer:
         ignore_reserved: If True, remove ALL Cat A and Cat B handling. Every IP
             (including loopback, multicast, private ranges) gets fully anonymized
             as Cat C. Affects both IPv4 and IPv6.
+        network_registry: If provided, enables subnet-aware host-bit locking.
+            The registry determines which bits are permuted (network portion)
+            and which are preserved (host portion) for each address.
     """
 
     def __init__(
@@ -54,11 +60,13 @@ class Anonymizer:
         verbose: bool = False,
         ignore_subnets: bool = False,
         ignore_reserved: bool = False,
+        network_registry: Optional[NetworkRegistry] = None,
     ) -> None:
         self._quiet = quiet
         self._verbose = verbose
         self._ignore_subnets = ignore_subnets
         self._ignore_reserved = ignore_reserved
+        self._network_registry = network_registry
         if salt is None:
             salt = os.urandom(16).hex()
             if not quiet:
@@ -208,6 +216,11 @@ class Anonymizer:
         is_v4 = isinstance(addr, ipaddress.IPv4Address)
         total_bits = 32 if is_v4 else 128
 
+        # --- Resolve host-bit boundary from network registry ---
+        host_boundary: Optional[int] = None
+        if self._network_registry is not None:
+            host_boundary = self._network_registry.lookup(ip_part)
+
         # --- Short prefix handling ---
         if prefix_len is not None:
             if is_v4:
@@ -243,10 +256,12 @@ class Anonymizer:
 
         # --- Category A: range-preserved ---
         if category == Category.RANGE_PRESERVED:
-            return self._anonymize_cat_a(addr, prefix_len, is_v4, total_bits, locked_bits)
+            return self._anonymize_cat_a(
+                addr, prefix_len, is_v4, total_bits, locked_bits, host_boundary
+            )
 
         # --- Category C: public ---
-        return self._anonymize_cat_c(addr, prefix_len, is_v4, total_bits)
+        return self._anonymize_cat_c(addr, prefix_len, is_v4, total_bits, host_boundary)
 
     def _anonymize_cat_a(
         self,
@@ -255,6 +270,7 @@ class Anonymizer:
         is_v4: bool,
         total_bits: int,
         locked_bits: int,
+        host_boundary: Optional[int] = None,
     ) -> str:
         int_val = int(addr)
         # Lock the top locked_bits, permute the rest
@@ -266,12 +282,18 @@ class Anonymizer:
 
         # Find the range for context
         range_name = self._find_cat_a_range_name(addr, is_v4)
-        anon_host = prefix_preserving_permute(
-            host_val,
-            remaining_bits,
-            self._salt,
-            f"v4:catA:{range_name}" if is_v4 else f"v6:catA:{range_name}",
-        )
+        context = f"v4:catA:{range_name}" if is_v4 else f"v6:catA:{range_name}"
+
+        # Host-bit locking: only permute network portion, preserve host portion
+        if host_boundary is not None and locked_bits < host_boundary < total_bits:
+            net_bits = host_boundary - locked_bits
+            host_bits = total_bits - host_boundary
+            net_part = host_val >> host_bits
+            host_part = host_val & ((1 << host_bits) - 1)
+            anon_net_part = prefix_preserving_permute(net_part, net_bits, self._salt, context)
+            anon_host = (anon_net_part << host_bits) | host_part
+        else:
+            anon_host = prefix_preserving_permute(host_val, remaining_bits, self._salt, context)
 
         anon_int = locked_part | anon_host
 
@@ -296,13 +318,14 @@ class Anonymizer:
         prefix_len: Optional[int],
         is_v4: bool,
         total_bits: int,
+        host_boundary: Optional[int] = None,
     ) -> str:
         int_val = int(addr)
 
         if is_v4:
-            return self._anonymize_cat_c_v4(addr, int_val, prefix_len, total_bits)
+            return self._anonymize_cat_c_v4(addr, int_val, prefix_len, total_bits, host_boundary)
         else:
-            return self._anonymize_cat_c_v6(addr, int_val, prefix_len, total_bits)
+            return self._anonymize_cat_c_v6(addr, int_val, prefix_len, total_bits, host_boundary)
 
     def _anonymize_cat_c_v4(
         self,
@@ -310,6 +333,7 @@ class Anonymizer:
         int_val: int,
         prefix_len: Optional[int],
         total_bits: int,
+        host_boundary: Optional[int] = None,
     ) -> str:
         first_octet = (int_val >> 24) & 0xFF
 
@@ -330,7 +354,19 @@ class Anonymizer:
 
         # Prefix-preserving permutation of bits 8-31
         lower_24 = int_val & 0xFFFFFF
-        anon_lower = prefix_preserving_permute(lower_24, 24, self._salt, f"v4:{first_octet}")
+
+        # Host-bit locking: only permute network portion, preserve host portion
+        if host_boundary is not None and 8 < host_boundary < 32:
+            net_bits = host_boundary - 8
+            host_bits_count = 32 - host_boundary
+            net_part = lower_24 >> host_bits_count
+            host_part = lower_24 & ((1 << host_bits_count) - 1)
+            anon_net = prefix_preserving_permute(
+                net_part, net_bits, self._salt, f"v4:{first_octet}"
+            )
+            anon_lower = (anon_net << host_bits_count) | host_part
+        else:
+            anon_lower = prefix_preserving_permute(lower_24, 24, self._salt, f"v4:{first_octet}")
 
         anon_int = (anon_first_octet << 24) | anon_lower
 
@@ -355,6 +391,7 @@ class Anonymizer:
         int_val: int,
         prefix_len: Optional[int],
         total_bits: int,
+        host_boundary: Optional[int] = None,
     ) -> str:
         first_byte = (int_val >> 120) & 0xFF
 
@@ -366,7 +403,19 @@ class Anonymizer:
 
         # Prefix-preserving permutation of bits 8-127
         lower_120 = int_val & ((1 << 120) - 1)
-        anon_lower = prefix_preserving_permute(lower_120, 120, self._salt, f"v6:{first_byte}")
+
+        # Host-bit locking: only permute network portion, preserve host portion
+        if host_boundary is not None and 8 < host_boundary < 128:
+            net_bits = host_boundary - 8
+            host_bits_count = 128 - host_boundary
+            net_part = lower_120 >> host_bits_count
+            host_part = lower_120 & ((1 << host_bits_count) - 1)
+            anon_net = prefix_preserving_permute(
+                net_part, net_bits, self._salt, f"v6:{first_byte}"
+            )
+            anon_lower = (anon_net << host_bits_count) | host_part
+        else:
+            anon_lower = prefix_preserving_permute(lower_120, 120, self._salt, f"v6:{first_byte}")
 
         anon_int = (anon_first_byte << 120) | anon_lower
 

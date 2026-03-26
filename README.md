@@ -84,7 +84,9 @@ ipanon [OPTIONS] [INPUT] [OUTPUT]
 | `--allow-pt-collisions` | Downgrade pass-through collision errors to warnings |
 | `--ignore-subnets` | Treat sub-/8 IPv4 private ranges as public. Only `10.0.0.0/8` stays range-preserved; Cat B and IPv6 are unaffected |
 | `--ignore-reserved` | Remove ALL reserved range handling (Cat A and Cat B). Every IP — including loopback, multicast, private — gets fully anonymized. Affects both IPv4 and IPv6 |
-| `-m`, `--mapping FILE` | Write JSON mapping of original-to-anonymized IPs to FILE |
+| `--networks CIDRS` | Comma-separated CIDRs for subnet-aware host-bit locking (e.g., `10.0.0.0/8-24`), or `auto` to collect from input. Preserves host bits within each subnet. Supports range notation and interface notation. Can combine with `--network-file` |
+| `--network-file FILE` | File with one CIDR per line for subnet-aware host-bit locking. Blank lines and `#` comments ignored. Can combine with `--networks` |
+| `-m`, `--mapping FILE` | Write JSON mapping of original-to-anonymized IPs to FILE. Includes network list when `--networks`/`--network-file` used |
 | `-v`, `--verbose` | Print stats to stderr. `-vv` also prints all mappings |
 | `-q`, `--quiet` | Suppress all warnings. Overrides `-v`/`-vv` |
 
@@ -104,6 +106,39 @@ ipanon --salt s --ignore-reserved < input.log
 export ANON_SALT="my-secret-salt"
 ipanon --salt-env ANON_SALT < input.log
 ```
+
+### Subnet-Aware Host-Bit Locking
+
+When anonymizing router configurations, the permutation can map valid host addresses onto broadcast or network addresses — which routers reject. The `--networks` flag prevents this by preserving host bits within known subnets:
+
+```bash
+# Plain CIDR: host bits within /29 are preserved
+ipanon --salt s --networks 192.168.1.0/29 < router.conf
+
+# Range notation: within the /8 block, preserve host bits at /24 boundary
+# Bits 8-23 are permuted, bits 24-31 are preserved
+ipanon --salt s --networks 10.0.0.0/8-24 < router.conf
+
+# Networks file for multi-router consistency
+cat > subnets.txt <<EOF
+# Large blocks with /24 host boundary
+10.0.0.0/8-24
+172.16.0.0/12-24
+# Specific small subnets
+192.168.1.0/29
+# IPv6
+2001:db8::/32-64
+EOF
+ipanon --salt s --network-file subnets.txt rtrA.conf > rtrA.anon
+ipanon --salt s --network-file subnets.txt rtrB.conf > rtrB.anon
+
+# Auto-collect subnets from input (one-off convenience)
+ipanon --salt s --networks auto < router.conf
+```
+
+Interface notation is accepted — `10.1.2.65/29` is interpreted as network `10.1.2.64/29`.
+
+The network list is part of the anonymization configuration alongside the salt. For reproducible multi-device anonymization, save both the salt and the networks file.
 
 ## Use Cases
 

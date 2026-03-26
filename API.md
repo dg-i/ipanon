@@ -12,6 +12,8 @@ import ipanon
 |------|------|-------------|
 | `Anonymizer` | class | Core anonymization engine |
 | `Category` | enum | IP classification categories |
+| `NetworkEntry` | dataclass | A network with match scope and host-bit boundary |
+| `NetworkRegistry` | class | Subnet registry for host-bit locking |
 | `PassThroughCollisionError` | exception | Raised on anonymized/pass-through IP collision |
 | `classify_ip` | function | Classify an IP into Category A/B/C |
 | `find_ips` | function | Find all IPs in a text string |
@@ -35,6 +37,7 @@ Anonymizer(
     verbose: bool = False,
     ignore_subnets: bool = False,
     ignore_reserved: bool = False,
+    network_registry: NetworkRegistry | None = None,
 )
 ```
 
@@ -50,6 +53,7 @@ Anonymizer(
 | `verbose` | `bool` | `False` | Enable verbose warnings (e.g., short-prefix pass-through notices). |
 | `ignore_subnets` | `bool` | `False` | Treat sub-/8 IPv4 Cat A ranges (`172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`) as public. Only `10.0.0.0/8` remains range-preserved. Cat B and IPv6 are unaffected. |
 | `ignore_reserved` | `bool` | `False` | Remove ALL Cat A and Cat B handling. Every IP (including loopback, multicast, private) gets fully anonymized as public. Affects both IPv4 and IPv6. |
+| `network_registry` | `NetworkRegistry \| None` | `None` | If provided, enables subnet-aware host-bit locking. The registry determines which bits are permuted (network portion) and which are preserved (host portion). |
 
 **Raises:**
 - `ValueError` — if a remap source is not a mixed first-octet, a remap target is not pure-public, or a remap target conflicts with a pass-through /8 exclusion.
@@ -204,6 +208,58 @@ Enum for IP classification categories.
 | `Category.RANGE_PRESERVED` | Category A — private/link-local ranges; prefix locked, host bits permuted |
 | `Category.PASS_THROUGH` | Category B — loopback, multicast, documentation; returned unchanged |
 | `Category.PUBLIC` | Category C — routable public IPs; fully anonymized |
+
+---
+
+## `NetworkRegistry`
+
+Collects subnets and provides least-specific-match lookup for host-bit locking.
+
+### Constructor
+
+```python
+NetworkRegistry()
+```
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `add(spec: str)` | Add a network spec (plain or range CIDR). Interface notation accepted. |
+| `lookup(addr_str: str) -> int \| None` | Find host-bit boundary for address. Returns `None` if no match. |
+| `load_file(path: str)` | Load specs from file (one per line, `#` comments, blank lines ignored). |
+| `load_from_text(text: str)` | Auto-collect CIDR patterns from text. |
+| `entries() -> list[NetworkEntry]` | Return all entries. |
+| `to_spec_list() -> list[str]` | Export entries as spec strings. |
+| `warn_overlaps()` | Print warnings to stderr for redundant overlapping networks. |
+
+### Examples
+
+```python
+from ipanon import Anonymizer, NetworkRegistry
+
+# Create registry with range notation
+registry = NetworkRegistry()
+registry.add("10.0.0.0/8-24")     # /8 scope, host boundary at /24
+registry.add("192.168.1.0/29")    # /29 scope and boundary
+registry.add("2001:db8::/32-64")  # IPv6
+
+# Use with Anonymizer
+anon = Anonymizer(salt="test", network_registry=registry)
+anon.anonymize("10.1.2.65")  # Last octet (65) preserved
+anon.anonymize("10.1.2.65/29")  # → "x.y.z.65/29"
+```
+
+---
+
+## `NetworkEntry`
+
+Dataclass representing a network with its match scope and host-bit boundary.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `network` | `IPv4Network \| IPv6Network` | Match scope (e.g., `10.0.0.0/8`) |
+| `host_boundary` | `int` | Prefix length where host bits start (e.g., `24`) |
 
 ---
 

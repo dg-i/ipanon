@@ -7,6 +7,7 @@ For project overview, installation, and usage, see [README.md](README.md).
 - `src/ipanon/ranges.py` — IP classification (Cat A/B/C), first-octet sets
 - `src/ipanon/permutation.py` — Fisher-Yates + HMAC prefix-preserving permute
 - `src/ipanon/anonymizer.py` — Core engine with dispatch, remap, caching
+- `src/ipanon/networks.py` — NetworkRegistry for subnet-aware host-bit locking
 - `src/ipanon/scanner.py` — Regex IP detection and text replacement
 - `src/ipanon/cli.py` — argparse CLI interface
 
@@ -26,8 +27,8 @@ pre-commit run --all-files    # run all pre-commit hooks
 1. **Formatting** — `ruff format src/ tests/`
 2. **Linting** — `ruff check src/ tests/`
 3. **Type checking** — `mypy src/` (configured in pyproject.toml, strict mode)
-4. **Tests** — `pytest tests/` (224 tests across 5 test files)
-5. **Test coverage verification** — Confirm all 5 test files are running (test_ranges, test_permutation, test_anonymizer, test_scanner, test_cli)
+4. **Tests** — `pytest tests/` (270 tests across 6 test files)
+5. **Test coverage verification** — Confirm all 6 test files are running (test_ranges, test_permutation, test_anonymizer, test_scanner, test_cli, test_networks)
 6. **All tests must pass** — **CRITICAL**: Fix any failing tests immediately, do not commit/push with failing tests
 7. **Final review** — Check `git diff --staged` to review what will be committed
 8. **Security check** — Verify no sensitive information (keys, tokens, passwords) is included

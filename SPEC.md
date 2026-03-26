@@ -1101,7 +1101,70 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 
 ---
 
-## 13. Warnings and Errors Summary
+## 13. Subnet-Aware Host-Bit Locking (networks.py)
+
+### 13.1 Problem
+
+The prefix-preserving permutation can map valid host addresses onto broadcast
+(all host bits = 1) or network (all host bits = 0) addresses within a subnet.
+Routers reject these addresses for interface assignment.
+
+### 13.2 Solution: NetworkRegistry
+
+A `NetworkRegistry` collects known subnets and provides least-specific-match
+lookup. During anonymization, the registry determines a `host_boundary` —
+the prefix length where host bits start. Bits above the boundary are permuted;
+bits at and below are preserved unchanged.
+
+### 13.3 Network Specification Format
+
+Two forms are supported:
+
+- **Plain CIDR**: `10.1.2.0/24` — match scope AND host boundary are both /24
+- **Range CIDR**: `10.0.0.0/8-24` — match scope is /8, host boundary is /24.
+  Bits 8–23 are HMAC-permuted, bits 24–31 are preserved.
+
+Interface notation is accepted: `11.2.3.65/29` → network `11.2.3.64/29`.
+
+### 13.4 Lookup Rule
+
+**Least specific (shortest prefix) match wins.** If both `10.0.0.0/8-24` and
+`10.1.2.0/29` are in the registry, an address in `10.1.2.0/29` matches the /8
+entry (host boundary = 24, preserving 8 host bits). This guarantees validity
+at all prefix lengths within the /8 block.
+
+### 13.5 Stability Property
+
+The HMAC context string is unchanged (`v4:{first_octet}` for Cat C IPv4).
+The prefix-preserving permutation produces the same bit-flip decisions for
+the first N bits regardless of how many total bits are permuted. Adding
+`--networks` only changes host bits (from permuted to preserved). The
+network portion of the output is identical with and without `--networks`.
+
+### 13.6 CLI Flags
+
+- `--networks CIDRS_OR_AUTO` — comma-separated CIDRs or `auto`
+- `--network-file FILE` — one CIDR per line, `#` comments, blank lines ignored
+- Both can be combined (merged into one registry)
+- With `-v`, overlapping (redundant) networks produce a warning
+
+### 13.7 Mapping File
+
+When `--mapping FILE` is used with networks, the JSON output includes the
+network list:
+
+```json
+{
+  "networks": ["10.0.0.0/8-24", "192.168.1.0/29"],
+  "mapping": {"10.1.2.65": "149.58.91.65", ...}
+}
+```
+
+Without networks, the format stays as the current flat dict.
+
+---
+
+## 14. Warnings and Errors Summary
 
 All warnings and errors go to stderr. All warnings are suppressed by `-q`/`--quiet`.
 

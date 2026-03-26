@@ -261,3 +261,129 @@ class TestCLIIgnoreReserved:
         assert result.returncode == 0
         assert "10.1.2.3" in result.stdout  # Pass-through
         assert "127.0.0.1" not in result.stdout  # Anonymized
+
+
+class TestNetworksFlag:
+    """--networks and --network-file flags."""
+
+    def test_networks_inline(self):
+        """--networks with comma-separated CIDRs preserves host bits."""
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "--networks",
+            "10.0.0.0/8-24",
+            stdin="host 10.1.2.65\n",
+        )
+        assert result.returncode == 0
+        # Last octet should be 65 (host bits preserved at /24 boundary)
+        ip = result.stdout.strip().split()[-1]
+        assert ip.endswith(".65")
+
+    def test_networks_auto(self):
+        """--networks auto collects CIDRs from input."""
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "--networks",
+            "auto",
+            stdin="ip address 10.1.2.65/29\n",
+        )
+        assert result.returncode == 0
+
+    def test_network_file(self, tmp_path: Path):
+        """--network-file loads from file."""
+        net_file = tmp_path / "nets.txt"
+        net_file.write_text("10.0.0.0/8-24\n")
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "--network-file",
+            str(net_file),
+            stdin="host 10.1.2.42\n",
+        )
+        assert result.returncode == 0
+        ip = result.stdout.strip().split()[-1]
+        assert ip.endswith(".42")
+
+    def test_networks_combined(self, tmp_path: Path):
+        """--networks and --network-file can be combined."""
+        net_file = tmp_path / "nets.txt"
+        net_file.write_text("10.0.0.0/8-24\n")
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "--network-file",
+            str(net_file),
+            "--networks",
+            "192.168.1.0/29",
+            stdin="host 10.1.2.42 and 192.168.1.5\n",
+        )
+        assert result.returncode == 0
+
+    def test_verbose_warns_overlap(self):
+        """Verbose mode warns about overlapping networks."""
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "-v",
+            "--networks",
+            "10.0.0.0/8,10.1.2.0/29",
+            stdin="host 10.1.2.5\n",
+        )
+        assert result.returncode == 0
+        assert "10.1.2.0/29" in result.stderr
+        assert "contained" in result.stderr.lower() or "redundant" in result.stderr.lower()
+
+    def test_no_networks_unchanged(self):
+        """Without --networks, output is identical to current behavior."""
+        r1 = run_ipanon("--salt", "test", stdin="host 10.1.2.65\n")
+        r2 = run_ipanon("--salt", "test", stdin="host 10.1.2.65\n")
+        assert r1.stdout == r2.stdout
+
+    def test_mapping_includes_networks(self, tmp_path: Path):
+        """Mapping file includes networks list when --networks used."""
+        map_file = tmp_path / "map.json"
+        run_ipanon(
+            "--salt",
+            "test",
+            "--networks",
+            "10.0.0.0/8-24",
+            "--mapping",
+            str(map_file),
+            stdin="host 10.1.2.65\n",
+        )
+        with open(map_file) as f:
+            data = json.load(f)
+        assert "networks" in data
+        assert "mapping" in data
+        assert "10.0.0.0/8-24" in data["networks"]
+
+    def test_mapping_without_networks_flat(self, tmp_path: Path):
+        """Mapping file is flat dict when --networks not used."""
+        map_file = tmp_path / "map.json"
+        run_ipanon(
+            "--salt",
+            "test",
+            "--mapping",
+            str(map_file),
+            stdin="host 10.1.2.65\n",
+        )
+        with open(map_file) as f:
+            data = json.load(f)
+        # Should be flat dict, not nested with "networks" key
+        assert "networks" not in data
+        assert isinstance(data, dict)
+
+    def test_invalid_network_spec_errors(self):
+        """Invalid network spec produces error."""
+        result = run_ipanon(
+            "--salt",
+            "test",
+            "--networks",
+            "10.0.0.0/24-16",
+            stdin="host 10.1.2.65\n",
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "ERROR" in result.stderr

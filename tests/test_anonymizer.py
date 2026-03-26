@@ -7,6 +7,7 @@ import ipaddress
 import pytest
 
 from ipanon.anonymizer import Anonymizer
+from ipanon.networks import NetworkRegistry
 
 
 class TestAnonymizerBasic:
@@ -651,3 +652,131 @@ class TestIgnoreReserved:
         assert a.anonymize("10.1.2.3") == "10.1.2.3"
         # But other IPs should be anonymized
         assert a.anonymize("127.0.0.1") != "127.0.0.1"
+
+
+class TestHostBitLocking:
+    """Subnet-aware anonymization: preserve host bits within subnets."""
+
+    def _make_registry(self, *specs: str) -> NetworkRegistry:
+        registry = NetworkRegistry()
+        for spec in specs:
+            registry.add(spec)
+        return registry
+
+    def test_host_bits_preserved_with_cidr(self) -> None:
+        """CIDR input matching registry preserves host bits."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("10.1.2.65/29")
+        # Host bits within /24 should be preserved: .65 = 0b01000001
+        # Last 8 bits (host within /24) should be 65
+        ip_part = result.split("/")[0]
+        last_octet = int(ip_part.split(".")[-1])
+        assert last_octet == 65
+
+    def test_host_bits_preserved_bare_ip(self) -> None:
+        """Bare IP matching registry preserves host bits."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("10.1.2.65")
+        last_octet = int(result.split(".")[-1])
+        assert last_octet == 65
+
+    def test_no_registry_full_permutation(self) -> None:
+        """Without registry, all bits permuted (backwards compat)."""
+        a = Anonymizer("salt")
+        result = a.anonymize("10.1.2.65")
+        # Test stability: output should differ from locked version
+        registry = self._make_registry("10.0.0.0/8-24")
+        a_locked = Anonymizer("salt", network_registry=registry)
+        result_locked = a_locked.anonymize("10.1.2.65")
+        # Both should start with same first octet (same Fisher-Yates)
+        assert result.split(".")[0] == result_locked.split(".")[0]
+
+    def test_stability_network_portion(self) -> None:
+        """Network portion identical with and without registry."""
+        a_plain = Anonymizer("salt")
+        registry = self._make_registry("10.0.0.0/8-24")
+        a_locked = Anonymizer("salt", network_registry=registry)
+
+        result_plain = a_plain.anonymize("10.1.2.65")
+        result_locked = a_locked.anonymize("10.1.2.65")
+
+        # First 3 octets should match (network portion: bits 0-23)
+        plain_net = ".".join(result_plain.split(".")[:3])
+        locked_net = ".".join(result_locked.split(".")[:3])
+        assert plain_net == locked_net
+
+    def test_no_broadcast_collision(self) -> None:
+        """Host address never becomes broadcast with registry."""
+        registry = self._make_registry("220.0.0.0/8-29")
+        a = Anonymizer("salt", network_registry=registry)
+        # .23 in /29 → host bits = 111 (broadcast within /29 = .7)
+        # But with /8-29 locking, last 3 bits of 23 = 111 are preserved
+        # 23 & 0x07 = 7 (broadcast). Wait, 23 = 0b10111, last 3 bits = 111 = 7 = broadcast
+        # This is the original broadcast address so it SHOULD stay broadcast.
+        # Let's use a non-broadcast host instead
+        result = a.anonymize("220.1.107.5/29")
+        ip_part = result.split("/")[0]
+        int_val = int(ipaddress.IPv4Address(ip_part))
+        host_bits = int_val & 0x07  # last 3 bits for /29
+        assert host_bits != 0  # not network
+        assert host_bits != 7  # not broadcast
+        assert host_bits == 5  # preserved from input
+
+    def test_network_addr_stays_network(self) -> None:
+        """Network address input remains network address with registry."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("10.1.2.0/24")
+        ip_part = result.split("/")[0]
+        last_octet = int(ip_part.split(".")[-1])
+        assert last_octet == 0
+
+    def test_cidr_suffix_preserved(self) -> None:
+        """CIDR suffix from input is preserved in output."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("10.1.2.65/29")
+        assert result.endswith("/29")
+
+    def test_ip_not_in_registry_full_permute(self) -> None:
+        """IP not matching any registry entry gets full permutation."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a_reg = Anonymizer("salt", network_registry=registry)
+        a_plain = Anonymizer("salt")
+        # 8.8.8.8 is not in 10.0.0.0/8
+        assert a_reg.anonymize("8.8.8.8") == a_plain.anonymize("8.8.8.8")
+
+    def test_cat_a_with_registry(self) -> None:
+        """Cat A (private) with registry locks host bits beyond Cat A locked bits."""
+        registry = self._make_registry("10.0.0.0/8-24")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("10.50.100.42")
+        addr = ipaddress.IPv4Address(result)
+        # Must stay in 10.0.0.0/8 (Cat A)
+        assert addr in ipaddress.IPv4Network("10.0.0.0/8")
+        # Last octet must be 42 (host bits preserved at /24 boundary)
+        assert int(result.split(".")[-1]) == 42
+
+    def test_ipv6_with_registry(self) -> None:
+        """IPv6 host-bit locking."""
+        registry = self._make_registry("2001:db8::/32-64")
+        a = Anonymizer("salt", network_registry=registry, ignore_reserved=True)
+        original = "2001:db8:1::abcd"
+        result = a.anonymize(original)
+        orig_addr = ipaddress.IPv6Address(original)
+        result_addr = ipaddress.IPv6Address(result)
+        # Last 64 bits (interface ID) should be preserved
+        orig_iid = int(orig_addr) & ((1 << 64) - 1)
+        result_iid = int(result_addr) & ((1 << 64) - 1)
+        assert orig_iid == result_iid
+
+    def test_plain_cidr_in_registry(self) -> None:
+        """Plain CIDR in registry locks at its own prefix length."""
+        registry = self._make_registry("192.168.1.0/29")
+        a = Anonymizer("salt", network_registry=registry)
+        result = a.anonymize("192.168.1.5")
+        int_val = int(ipaddress.IPv4Address(result))
+        host_bits = int_val & 0x07  # last 3 bits for /29
+        assert host_bits == 5

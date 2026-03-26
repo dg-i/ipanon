@@ -75,6 +75,11 @@ def _is_valid_ip_match(s: str) -> bool:
         return False
 
 
+def extract_cidrs(text: str) -> List[str]:
+    """Extract all CIDR strings (addr/prefix) from text."""
+    return [m.group(0) for m in find_ips(text) if "/" in m.group(0)]
+
+
 def scan_and_replace(text: str, anonymizer: Anonymizer) -> str:
     """Scan text for IP addresses and replace them with anonymized versions.
 

@@ -9,6 +9,7 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 from ipanon.anonymizer import Anonymizer, PassThroughCollisionError
+from ipanon.networks import NetworkRegistry
 from ipanon.scanner import scan_and_replace
 
 
@@ -102,6 +103,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--networks",
+        metavar="CIDRS_OR_AUTO",
+        help=(
+            "Comma-separated CIDRs for subnet-aware host-bit locking "
+            "(e.g., 10.0.0.0/8-24,192.168.1.0/29), or 'auto' to collect "
+            "from input. Preserves host bits within each subnet — prevents "
+            "broadcast/network address collisions. Supports range notation "
+            "(A/X-Y) and interface notation (host bits OK). "
+            "Can combine with --network-file."
+        ),
+    )
+    parser.add_argument(
+        "--network-file",
+        metavar="FILE",
+        help=(
+            "File with one CIDR per line for subnet-aware host-bit locking. "
+            "Blank lines and # comments ignored. Supports range notation "
+            "(e.g., 10.0.0.0/8-24). Can combine with --networks."
+        ),
+    )
+    parser.add_argument(
         "-m",
         "--mapping",
         metavar="FILE",
@@ -154,6 +176,36 @@ def main(argv: Optional[List[str]] = None) -> None:
         source, target = parse_remap(remap_str)
         remaps[source] = target
 
+    # Read input (needed before network auto-collection)
+    if args.input_file:
+        with open(args.input_file) as f:
+            text = f.read()
+    else:
+        text = sys.stdin.read()
+
+    # Build network registry
+    registry: Optional[NetworkRegistry] = None
+    if args.networks or args.network_file:
+        registry = NetworkRegistry()
+        if args.network_file:
+            try:
+                registry.load_file(args.network_file)
+            except (OSError, ValueError) as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                sys.exit(1)
+        if args.networks:
+            if args.networks == "auto":
+                registry.load_from_text(text)
+            else:
+                try:
+                    for cidr in args.networks.split(","):
+                        registry.add(cidr.strip())
+                except ValueError as e:
+                    print(f"ERROR: {e}", file=sys.stderr)
+                    sys.exit(1)
+        if args.verbose >= 1 and not args.quiet:
+            registry.warn_overlaps()
+
     # Create anonymizer
     try:
         anonymizer = Anonymizer(
@@ -165,17 +217,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             verbose=args.verbose >= 1,
             ignore_subnets=args.ignore_subnets,
             ignore_reserved=args.ignore_reserved,
+            network_registry=registry,
         )
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # Read input
-    if args.input_file:
-        with open(args.input_file) as f:
-            text = f.read()
-    else:
-        text = sys.stdin.read()
 
     # Process
     try:
@@ -194,8 +240,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     # Write mapping
     if args.mapping:
         mapping = anonymizer.get_mapping()
+        mapping_data: object
+        if registry is not None:
+            mapping_data = {
+                "networks": registry.to_spec_list(),
+                "mapping": mapping,
+            }
+        else:
+            mapping_data = mapping
         with open(args.mapping, "w") as f:
-            json.dump(mapping, f, indent=2, sort_keys=True)
+            json.dump(mapping_data, f, indent=2, sort_keys=True)
 
     # Verbose output (suppressed by --quiet)
     if args.quiet:
