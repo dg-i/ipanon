@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import sys
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 from ipanon.permutation import make_permutation, prefix_preserving_permute
 
@@ -151,7 +151,7 @@ class Anonymizer:
         # Track warned mixed octets to warn only once
         self._warned_mixed: Set[int] = set()
 
-    def _classify_ip(self, addr: IPAddress) -> tuple:
+    def _classify_ip(self, addr: IPAddress) -> Tuple[Category, int]:
         """Classify an IP using the active (filtered) Cat A/B lists.
 
         Returns (Category, locked_bits) just like ranges.classify_ip(),
@@ -303,6 +303,7 @@ class Anonymizer:
             if (int_val & host_mask) == 0:
                 anon_int &= ((1 << total_bits) - 1) ^ host_mask
 
+        result_addr: IPAddress
         if is_v4:
             result_addr = ipaddress.IPv4Address(anon_int)
         else:
@@ -323,8 +324,10 @@ class Anonymizer:
         int_val = int(addr)
 
         if is_v4:
+            assert isinstance(addr, ipaddress.IPv4Address)
             return self._anonymize_cat_c_v4(addr, int_val, prefix_len, total_bits, host_boundary)
         else:
+            assert isinstance(addr, ipaddress.IPv6Address)
             return self._anonymize_cat_c_v6(addr, int_val, prefix_len, total_bits, host_boundary)
 
     def _anonymize_cat_c_v4(
