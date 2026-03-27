@@ -213,7 +213,7 @@ Enum for IP classification categories.
 
 ## `NetworkRegistry`
 
-Collects subnets and provides least-specific-match lookup for host-bit locking.
+Collects subnets and provides lowest-host-boundary lookup for host-bit locking.
 
 ### Constructor
 

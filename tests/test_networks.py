@@ -1,4 +1,4 @@
-"""Tests for NetworkRegistry: subnet collection and least-specific-match lookup."""
+"""Tests for NetworkRegistry: subnet collection and lowest-host-boundary lookup."""
 
 from __future__ import annotations
 
@@ -118,20 +118,20 @@ class TestNetworkRegistryLookup:
         registry = NetworkRegistry()
         assert registry.lookup("10.1.2.5") is None
 
-    def test_least_specific_wins(self) -> None:
-        """Least specific (shortest prefix) match wins."""
+    def test_lowest_host_boundary_wins(self) -> None:
+        """Lowest host_boundary wins among all matching entries."""
         registry = NetworkRegistry()
-        registry.add("10.1.2.0/29")
-        registry.add("10.0.0.0/8-24")
-        # /8 is least specific, its host_boundary (24) should win
-        assert registry.lookup("10.1.2.5") == 24
+        registry.add("10.0.0.0/8-28")  # prefix=8, host_boundary=28
+        registry.add("10.0.0.0/16-24")  # prefix=16, host_boundary=24
+        # 10.0.1.5 is in both /8 and /16; /8 has boundary 28, /16 has 24 → 24 wins
+        assert registry.lookup("10.0.1.5") == 24
 
-    def test_least_specific_wins_reversed_add_order(self) -> None:
-        """Least specific wins regardless of add order."""
+    def test_lowest_host_boundary_wins_reversed_add_order(self) -> None:
+        """Lowest host_boundary wins regardless of add order."""
         registry = NetworkRegistry()
-        registry.add("10.0.0.0/8-24")
-        registry.add("10.1.2.0/29")
-        assert registry.lookup("10.1.2.5") == 24
+        registry.add("10.0.0.0/16-24")  # prefix=16, host_boundary=24
+        registry.add("10.0.0.0/8-28")  # prefix=8, host_boundary=28
+        assert registry.lookup("10.0.1.5") == 24
 
     def test_non_overlapping_networks(self) -> None:
         """Non-overlapping networks match independently."""

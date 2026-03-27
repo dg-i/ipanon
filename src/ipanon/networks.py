@@ -27,7 +27,10 @@ class NetworkEntry:
 
 
 class NetworkRegistry:
-    """Collects subnets and provides least-specific-match lookup for host-bit locking.
+    """Collects subnets and provides lowest-host-boundary lookup for host-bit locking.
+
+    When an address matches multiple entries, the entry with the lowest
+    host_boundary wins (fewest bits anonymized, most host bits preserved).
 
     Supports two network specification formats:
     - Plain CIDR: '10.1.2.0/24' — match scope and host boundary are both /24
@@ -92,8 +95,9 @@ class NetworkRegistry:
     def lookup(self, addr_str: str) -> Optional[int]:
         """Find the host-bit boundary for an address.
 
-        Returns the host_boundary from the least specific (shortest prefix)
-        matching entry. Returns None if no match.
+        Returns the lowest host_boundary among all matching entries
+        (fewest bits anonymized, most host bits preserved).
+        Returns None if no match.
         """
         try:
             addr = ipaddress.ip_address(addr_str)
@@ -102,12 +106,12 @@ class NetworkRegistry:
 
         entries = self._v4_entries if isinstance(addr, ipaddress.IPv4Address) else self._v6_entries
 
-        # Iterate least-specific-first (sorted by prefix length ascending)
+        best: Optional[int] = None
         for entry in entries:
             if addr in entry.network:
-                return entry.host_boundary
-
-        return None
+                if best is None or entry.host_boundary < best:
+                    best = entry.host_boundary
+        return best
 
     def entries(self) -> List[NetworkEntry]:
         """Return all entries (v4 + v6)."""

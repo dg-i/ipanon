@@ -1282,8 +1282,8 @@ Uses subprocess to invoke `python -m ipanon.cli`.
 - Basic match returns host_boundary
 - No match returns None
 - Empty registry returns None
-- Least specific (shortest prefix) match wins
-- Least specific wins regardless of add order
+- Lowest host_boundary wins among all matching entries
+- Lowest host_boundary wins regardless of add order
 - Non-overlapping networks match independently
 - IPv6 address lookup
 - Range CIDR returns host_boundary, not match prefix
@@ -1316,7 +1316,7 @@ Routers reject these addresses for interface assignment.
 
 ### 13.2 Solution: NetworkRegistry
 
-A `NetworkRegistry` collects known subnets and provides least-specific-match
+A `NetworkRegistry` collects known subnets and provides lowest-host-boundary
 lookup. During anonymization, the registry determines a `host_boundary` —
 the bit position where host bits start. Bits above the boundary are anonymized
 (shuffle + HMAC permutation); bits at and below the boundary are preserved
@@ -1393,10 +1393,19 @@ fe80::1
 
 ### 13.4 Lookup Rule
 
-**Least specific (shortest prefix) match wins.** If both `10.0.0.0/8-24` and
-`10.1.2.0/29` are in the registry, an address in `10.1.2.0/29` matches the /8
-entry (host boundary = 24, preserving 8 host bits). This guarantees validity
-at all prefix lengths within the /8 block.
+**Lowest host_boundary wins.** Among all matching entries, the one with the
+smallest `host_boundary` is selected (fewest bits anonymized, most host bits
+preserved). This is the safest choice: it locks the most host bits.
+
+**Example:** Given two overlapping range entries:
+
+- `93.94.128.0/19-27` → match scope /19, host_boundary=27
+- `93.94.128.0/20-24` → match scope /20, host_boundary=24
+
+An address in `93.94.128.0/20` matches both entries. The /19 entry has
+host_boundary=27 (5 host bits preserved); the /20 entry has host_boundary=24
+(8 host bits preserved). The lowest host_boundary (24) wins, preserving
+the most host bits.
 
 ### 13.5 Stability Property
 
